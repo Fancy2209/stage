@@ -182,8 +182,8 @@ export class BlurFilter extends FilterBase implements IBitmapFilter<'blur', IBlu
 
 		target.x -= pad.x * 2;
 		target.y -= pad.y * 2;
-		target.width += pad.x * 2;
-		target.height += pad.y * 2;
+		target.width += pad.x * 4;
+		target.height += pad.y * 4;
 
 		return target;
 	}
