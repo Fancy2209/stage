@@ -128,6 +128,7 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 
 		return this._unloadManager;
 	}
+
 	private _asyncRead: Promise<boolean>;
 
 	public _lazySymbol: LazyImageSymbolTag;
@@ -1489,7 +1490,7 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 			this.fillRect(this._rect, this._initalFillColor);
 			this._initalFillColor = null;
 		}
-		
+
 		this.fillRect(new Rectangle(x, y, 1, 1), color);
 	}
 
