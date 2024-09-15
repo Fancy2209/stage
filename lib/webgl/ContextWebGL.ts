@@ -322,7 +322,7 @@ export class ContextWebGL implements IContextGL {
 
 		this.stateChangeCallback && this.stateChangeCallback('drawToBitmap');
 
-		const pixels = new Uint8Array(destination.getDataInternal().buffer);
+		const pixels = new Uint8Array(destination.getDataInternal(true, true).buffer);
 		const rt = this._texContext._currentRT;
 		const fence = this._fenceContext;
 		const { width, height } = destination;
