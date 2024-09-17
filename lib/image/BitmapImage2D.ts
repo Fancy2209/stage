@@ -129,6 +129,8 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 		return this._unloadManager;
 	}
 
+	private _asyncRead: Promise<boolean>;
+
 	public _lazySymbol: LazyImageSymbolTag;
 
 	protected _isSymbolSource: boolean = false;
@@ -145,9 +147,76 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 	protected _nestedBitmap: BitmapImage2D[] = [];
 	protected _sourceBitmap: BitmapImage2D;
 
-	// request a _data field without a calling getter of 'data'
+	protected _imageDataDirty: boolean;
 
-	/*internal*/ getDataInternal(constructEmpty = true, skipSync = false): Uint8ClampedArray {
+	protected _initalFillColor: number = null;
+	protected _lastUsedFill: number = null;
+
+	protected syncData(async = false): boolean | Promise<boolean> {
+
+		if (async && this._asyncRead) {
+			return this._asyncRead;
+		}
+
+		if (!async && this._asyncRead) {
+			throw '[SceneImage2D] Synced read not allowed while async read is requested!';
+		}
+
+		this.applySymbol();
+
+		// update data from pixels from GPU
+		if (!this._imageDataDirty) {
+			return async ? Promise.resolve(false) : false;
+		}
+
+		const context = <ContextWebGL> this._stage.context;
+
+		this._stage.setRenderTarget(this, false);
+
+		// when we call syncData, we already loose other data
+		// not require apply symbol etc, because it already should be applied
+		if (!this._data) {
+			this._data = new Uint8ClampedArray(this.width * this.height * 4);
+		}
+
+		// mark that this internal call, avoid reqursion loop
+		this._asyncRead = context.drawToBitmapImage2D(this, false, async);
+
+		this._stage.setRenderTarget(null);
+
+		if (!async) {
+			this._imageDataDirty = false;
+			// we store pixel buffer already as PMA.
+			// we should prevent unpack what already is PMA
+			this._unpackPMA = false;
+			return true;
+		}
+
+		return this._asyncRead.then((_status: boolean) => {
+			this._imageDataDirty = false;
+			this._unpackPMA = false;
+			this._asyncRead = null;
+
+			return true;
+		});
+	}
+
+	public getDataInternal(constructEmpty = true, skipSync = false): Uint8ClampedArray {
+
+		// if it empty, fill with initlal value
+		if (this._initalFillColor !== null) {
+			//use CPU fill to avoid a readback when syncing
+			this.fillRect(this.rect, this._initalFillColor, !skipSync);
+			this._initalFillColor = null;
+		}
+
+		if (!skipSync && this._imageDataDirty) {
+			// sync data already should fill _data
+			this.syncData(false);
+
+			return this._data;
+		}
+
 		this.applySymbol();
 
 		if (!this._data && (constructEmpty || this._alphaChannel)) {
@@ -333,13 +402,14 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 		this._transparent = transparent;
 		this._stage = stage;
 
-		if (fillColor != null)
-			this.fillRect(this._rect, fillColor);
+		this._initalFillColor = fillColor;
+		this._lastUsedFill = fillColor;
 	}
 
 	public addLazySymbol(tag: LazyImageSymbolTag) {
 		this._lazySymbol = tag;
 		this._isSymbolSource = true;
+		this._initalFillColor = null;
 
 		this.invalidateGPU();
 	}
@@ -1066,59 +1136,82 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 	 *              0xFF336699.
 	 * @throws TypeError The rect is null.
 	 */
-	public fillRect(rect: Rectangle, color: number): void {
+	public fillRect(rect: Rectangle, color: number, useCPU: boolean = false): void {
 		this.dropAllReferences();
 
-		if (!this._data) {
-			try {
-				this._data = new Uint8ClampedArray(this.width * this.height * 4);
-			} catch (e) {
-				console.error(this.width, this.height);
+		if (useCPU) {
+			if (!this._data) {
+				try {
+					this._data = new Uint8ClampedArray(this.width * this.height * 4);
+				} catch (e) {
+					console.error(this.width, this.height);
+				}
 			}
-		}
 
-		const
-			x = ~~rect.x,
-			y = ~~rect.y,
-			width = ~~rect.width,
-			height = ~~rect.height,
-			data = new Uint32Array(this._data.buffer);
+			const
+				x = ~~rect.x,
+				y = ~~rect.y,
+				width = ~~rect.width,
+				height = ~~rect.height,
+				data = new Uint32Array(this._data.buffer);
 
-		let rgba = 0;
-		if (this._transparent) {
-			const [a, r, g, b] = ColorUtils.float32ColorToARGB(color);
-			// PMA
-			// we should FLIP bytes because a use UINT32
-			rgba = ColorUtils.ARGBtoFloat32(
-				a,
-				b * a / 0xff | 0,
-				g * a / 0xff | 0,
-				r * a / 0xff | 0) >>> 0;
+			let rgba = 0;
+			if (this._transparent) {
+				const [a, r, g, b] = ColorUtils.float32ColorToARGB(color);
+				// PMA
+				// we should FLIP bytes because a use UINT32
+				rgba = ColorUtils.ARGBtoFloat32(
+					a,
+					b * a / 0xff | 0,
+					g * a / 0xff | 0,
+					r * a / 0xff | 0) >>> 0;
 
-			/**
-			 * TW2 has bug with transition over timeline when used a PMA
-			 * I think that caused by invalid blend mode
-			 */
-			this._unpackPMA = false;
-		} else {
-			rgba = fastARGB_to_ABGR(color & 0xffffff, false);
-		}
-
-		//fast path for complete fill
-		if (x == 0 && y == 0 && width == this._rect.width && height == this._rect.height) {
-			data.fill(rgba);
-		} else {
-			let j: number;
-			let index: number;
-			for (j = 0; j < height; ++j) {
-
-				index = x + (j + y) * this._rect.width;
-
-				data.fill(rgba, index, index + width);
+				/**
+				 * TW2 has bug with transition over timeline when used a PMA
+				 * I think that caused by invalid blend mode
+				 */
+				this._unpackPMA = false;
+			} else {
+				rgba = fastARGB_to_ABGR(color & 0xffffff, false);
 			}
-		}
 
-		this.invalidateGPU();
+			//fast path for complete fill
+			if (x == 0 && y == 0 && width == this._rect.width && height == this._rect.height) {
+				data.fill(rgba);
+			} else {
+				let j: number;
+				let index: number;
+				for (j = 0; j < height; ++j) {
+
+					index = x + (j + y) * this._rect.width;
+
+					data.fill(rgba, index, index + width);
+				}
+			}
+
+			this.invalidateGPU();
+		} else {
+			const argb = ColorUtils.float32ColorToARGB(color);
+			const alpha = this._transparent ? argb[0] / 255 : 1;
+			const isCrop = rect !== this._rect && !this._rect.equals(rect);
+
+			this._stage.setRenderTarget(this, true, 0, 0, true);
+			this._stage.setScissor(rect);
+
+			// we shure that color is fully filled when there are not any crops
+			this._lastUsedFill = isCrop ? null : color;
+
+			this._stage.clear(
+				(argb[1] / 0xff) * alpha,
+				(argb[2] / 0xff) * alpha,
+				(argb[3] / 0xff) * alpha,
+				alpha
+			);
+
+			this._stage.setScissor(null);
+
+			this._imageDataDirty = true;
+		}
 	}
 
 	/**
@@ -1393,20 +1486,12 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 		if (!this._rect.contains(x, y))
 			return;
 
-		this.dropAllReferences();
+		if (this._initalFillColor !== null) {
+			this.fillRect(this._rect, this._initalFillColor);
+			this._initalFillColor = null;
+		}
 
-		const index = (~~x + ~~y * this._rect.width) * 4;
-		const argb = ColorUtils.float32ColorToARGB(color);
-		const data = this.getDataInternal(true);
-
-		const factor = this._transparent ? argb[0] / 0xff : 1;
-
-		data[index + 0] = argb[1] * factor | 0;
-		data[index + 1] = argb[2] * factor | 0;
-		data[index + 2] = argb[3] * factor | 0;
-		data[index + 3] = this._transparent ? argb[0] : 0xFF;
-
-		this.invalidateGPU();
+		this.fillRect(new Rectangle(x, y, 1, 1), color);
 	}
 
 	/**
