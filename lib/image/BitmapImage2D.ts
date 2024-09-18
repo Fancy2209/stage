@@ -207,7 +207,6 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 		if (this._initalFillColor !== null) {
 			//use CPU fill to avoid a readback when syncing
 			this.fillRect(this.rect, this._initalFillColor, !skipSync);
-			this._initalFillColor = null;
 		}
 
 		if (!skipSync && this._imageDataDirty) {
@@ -409,6 +408,7 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 	public addLazySymbol(tag: LazyImageSymbolTag) {
 		this._lazySymbol = tag;
 		this._isSymbolSource = true;
+		// we should reset initial color, because a bitmap symbol has data of its own
 		this._initalFillColor = null;
 
 		this.invalidateGPU();
@@ -1138,7 +1138,8 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 	 */
 	public fillRect(rect: Rectangle, color: number, useCPU: boolean = false): void {
 		this.dropAllReferences();
-
+		//ensure we reset initial color to stop recursive texture writes
+		this._initalFillColor = null;
 		if (useCPU) {
 			if (!this._data) {
 				try {
@@ -1486,10 +1487,8 @@ export class BitmapImage2D extends Image2D implements IUnloadable {
 		if (!this._rect.contains(x, y))
 			return;
 
-		if (this._initalFillColor !== null) {
+		if (this._initalFillColor !== null)
 			this.fillRect(this._rect, this._initalFillColor);
-			this._initalFillColor = null;
-		}
 
 		this.fillRect(new Rectangle(x, y, 1, 1), color);
 	}
